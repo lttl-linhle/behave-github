@@ -39,6 +39,7 @@ jobs:
             --no-capture \
             --format json \
             --outfile reports/behave-report.json
+            --tags-formatter json
         continue-on-error: true
 
       - name: Check report file
