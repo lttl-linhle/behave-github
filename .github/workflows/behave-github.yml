@@ -1,0 +1,101 @@
+name: AgileTest Sync - Behave
+
+on:
+  workflow_dispatch:
+    inputs:
+      TEST_EXECUTION_KEY:
+        description: "Test Execution Key from Jira"
+      PROJECT_KEY:
+        description: "Project Key từ Jira truyền sang"
+
+env:
+  BASE_URL: ${{ vars.BASE_URL }}
+  BASE_AUTH_URL: ${{ vars.BASE_AUTH_URL }}
+  CLIENT_ID: ${{ secrets.CLIENT_ID }}
+  CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+  PROJECT_KEY: ${{ github.event.inputs.PROJECT_KEY || vars.PROJECT_KEY }}
+
+jobs:
+  run-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      - name: Execute Behave Tests
+        run: |
+          behave features/cart.feature \
+            --no-capture \
+            --format json \
+            --outfile reports/behave-report.json
+        continue-on-error: true
+
+      - name: Check report file
+        if: always()
+        run: |
+          echo "=== Report content ==="
+          cat reports/behave-report.json || echo "File không tồn tại!"
+
+      - name: Submit to AgileTest
+        if: always()
+        run: |
+          TOKEN=$(curl -s "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -H 'Content-Type:application/json' \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" | tr -d '"')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+            echo "Token rỗng!"
+            exit 1
+          fi
+
+          if [ -n "${{ github.event.inputs.TEST_EXECUTION_KEY }}" ]; then
+            echo "Upload vào Test Execution: ${{ github.event.inputs.TEST_EXECUTION_KEY }}"
+            curl -X POST "$BASE_URL/ds/test-executions/behave?projectKey=$PROJECT_KEY&testExecutionKey=${{ github.event.inputs.TEST_EXECUTION_KEY }}" \
+              -H "Content-Type:application/json" \
+              -H "Authorization:JWT $TOKEN" \
+              --data-binary "@reports/behave-report.json"
+          else
+            echo "Tạo mới Test Execution"
+            curl -X POST "$BASE_URL/ds/test-executions/behave?projectKey=$PROJECT_KEY" \
+              -H "Content-Type:application/json" \
+              -H "Authorization:JWT $TOKEN" \
+              --data-binary "@reports/behave-report.json"
+          fi
+
+      - name: Update Pipeline Status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            RESULT="success"
+          else
+            RESULT="failed"
+          fi
+
+          TOKEN=$(curl -s "$BASE_AUTH_URL/api/apikeys/authenticate" \
+            -X POST -H 'Content-Type:application/json' \
+            -d "{\"clientId\":\"$CLIENT_ID\",\"clientSecret\":\"$CLIENT_SECRET\"}" | tr -d '"')
+
+          JOB_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          if [ -n "${{ github.event.inputs.TEST_EXECUTION_KEY }}" ]; then
+            curl -X POST "$BASE_AUTH_URL/ds/test-executions/${{ github.event.inputs.TEST_EXECUTION_KEY }}/pipeline/history?projectKey=$PROJECT_KEY" \
+              -H "Content-Type: application/json" \
+              -H "Authorization: JWT $TOKEN" \
+              --data "{
+                \"jobURL\": \"$JOB_URL\",
+                \"repository\": \"${{ github.repository }}\",
+                \"tool\": \"github\",
+                \"result\": \"$RESULT\"
+              }"
+          fi
